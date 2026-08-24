@@ -10,7 +10,7 @@ from atomworks.ml.datasets.pandas_dataset import PandasDataset, StructuralDatase
 from atomworks.ml.datasets.parsers.default_metadata_row_parsers import GenericDFParser
 from atomworks.ml.samplers import (
     DistributedMixedSampler,
-    calculate_weights_for_pdb_dataset_df,
+    calculate_hierarchical_cluster_weights,
 )
 from omegaconf import DictConfig
 from torch.utils.data import DataLoader, WeightedRandomSampler
@@ -37,6 +37,13 @@ elif model_type == "ligand_mpnn":
     train_structure_noise_default = 0.1
 else:
     raise ValueError(f"Unknown model_type: {model_type}")
+
+# Hierarchical cluster sampling controls (see
+# docs/superpowers/specs/2026-08-21-hierarchical-cluster-sampler-design.md).
+# temperature per level: 0.0 = full structure-space balancing (uniform at each level),
+# 1.0 = natural PDB frequency (flat sampling). Scalar broadcasts to all levels.
+CLUSTER_COLUMN_PREFIX = "cluster_"
+CLUSTER_SAMPLING_TEMPERATURE = 0.0
 
 
 def create_noam_scheduler(
@@ -164,11 +171,11 @@ train_fallback_dataset = StructuralDatasetWrapper(
     },
 )
 
-# Calculate weights for train dataset
-train_weights = calculate_weights_for_pdb_dataset_df(
-    dataset_df=train_structural_dataset.data,
-    beta=1.0,  # For chains
-    alphas={"a_prot": 1.0, "a_nuc": 0, "a_ligand": 0, "a_loi": 0},
+# Calculate weights for train dataset via the nested-cluster hierarchical descent.
+train_weights = calculate_hierarchical_cluster_weights(
+    train_structural_dataset.data,
+    cluster_column_prefix=CLUSTER_COLUMN_PREFIX,
+    temperature=CLUSTER_SAMPLING_TEMPERATURE,
 )
 
 # Create train sampler with fallback
@@ -235,10 +242,10 @@ val_structural_dataset = StructuralDatasetWrapper(
 )
 
 # Create val sampler with fallback
-val_weights = calculate_weights_for_pdb_dataset_df(
-    dataset_df=val_structural_dataset.data,
-    beta=1.0,  # For chains
-    alphas={"a_prot": 1.0, "a_nuc": 0, "a_ligand": 0, "a_loi": 0},
+val_weights = calculate_hierarchical_cluster_weights(
+    val_structural_dataset.data,
+    cluster_column_prefix=CLUSTER_COLUMN_PREFIX,
+    temperature=CLUSTER_SAMPLING_TEMPERATURE,
 )
 
 val_sampler = DistributedMixedSampler(
