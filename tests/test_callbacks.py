@@ -11,6 +11,9 @@ per-rank validation CSVs written for one epoch, de-duplicating rows by the
 one rank) and skipping empty rank files.
 """
 
+import math
+
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -102,6 +105,59 @@ def test_empty_rank_csv_is_skipped(tmp_path):
     merged = _callback(tmp_path)._load_and_concatenate_csvs(epoch=5)
 
     assert merged["example_id"].tolist() == ["e1"]
+
+
+def test_per_dataset_metric_means_groups_and_macro_averages():
+    # Two bins; each example emits one metric row (other columns NaN), mirroring the
+    # real callback's per-metric rows.
+    merged = pd.DataFrame([
+        {"example_id": "a", "dataset": "sim_0.5", "sequence_recovery.mean": 0.2, "nll.mean": np.nan},
+        {"example_id": "a", "dataset": "sim_0.5", "sequence_recovery.mean": np.nan, "nll.mean": 3.0},
+        {"example_id": "b", "dataset": "sim_0.5", "sequence_recovery.mean": 0.4, "nll.mean": np.nan},
+        {"example_id": "c", "dataset": "sim_0.8", "sequence_recovery.mean": 0.9, "nll.mean": np.nan},
+    ])
+    out = StoreValidationMetricsInDFCallback._per_dataset_metric_means(merged)
+    assert out["val/sim_0.5/sequence_recovery.mean"] == pytest.approx(0.3)
+    assert out["val/sim_0.5/nll.mean"] == pytest.approx(3.0)
+    assert out["val/sim_0.5/n_examples"] == 2
+    assert out["val/sim_0.8/sequence_recovery.mean"] == pytest.approx(0.9)
+    # macro = mean over the two per-bin means of the recovery metric
+    assert out["val/mean/sequence_recovery.mean"] == pytest.approx((0.3 + 0.9) / 2)
+
+
+class _FakeFabric:
+    def __init__(self, has_loggers):
+        self.loggers = [object()] if has_loggers else []
+        self.is_global_zero = True
+        self.logged = {}
+
+    def log_dict(self, d, step=None):
+        self.logged = dict(d)
+        self.logged["_step"] = step
+
+
+class _FakeTrainer:
+    def __init__(self, has_loggers):
+        self.fabric = _FakeFabric(has_loggers)
+        self.state = {"global_step": 7}
+
+
+def test_emits_to_log_dict_when_loggers_present(tmp_path):
+    cb = StoreValidationMetricsInDFCallback(save_dir=tmp_path, log_to_loggers=True)
+    merged = pd.DataFrame([
+        {"example_id": "a", "dataset": "sim_0.5", "sequence_recovery.mean": 0.5},
+    ])
+    trainer = _FakeTrainer(has_loggers=True)
+    cb._maybe_log_to_loggers(trainer, merged)
+    assert trainer.fabric.logged["val/sim_0.5/sequence_recovery.mean"] == pytest.approx(0.5)
+    assert trainer.fabric.logged["_step"] == 7
+
+
+def test_no_emit_when_no_loggers(tmp_path):
+    cb = StoreValidationMetricsInDFCallback(save_dir=tmp_path, log_to_loggers=True)
+    trainer = _FakeTrainer(has_loggers=False)
+    cb._maybe_log_to_loggers(trainer, pd.DataFrame([{"example_id": "a", "dataset": "sim_0.5", "m": 1.0}]))
+    assert trainer.fabric.logged == {}
 
 
 if __name__ == "__main__":

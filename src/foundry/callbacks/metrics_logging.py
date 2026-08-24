@@ -20,9 +20,45 @@ class StoreValidationMetricsInDFCallback(BaseCallback):
         self,
         save_dir: os.PathLike,
         metrics_to_save: list[str] | Literal["all"] = "all",
+        log_to_loggers: bool = False,
     ):
         self.save_dir = Path(save_dir)
         self.metrics_to_save = metrics_to_save
+        self.log_to_loggers = log_to_loggers
+
+    @staticmethod
+    def _per_dataset_metric_means(merged_df: pd.DataFrame) -> dict[str, float]:
+        """Per-dataset (=similarity-bin) mean of every numeric metric column, plus a
+        macro-average across datasets and a per-dataset example count. Keys are prefixed
+        `val/<dataset>/...`."""
+        metric_cols = [
+            c for c in merged_df.select_dtypes("number").columns if c != "epoch"
+        ]
+        out: dict[str, float] = {}
+        if not metric_cols:
+            return out
+        grouped = merged_df.groupby("dataset")[metric_cols].mean()  # skipna=True
+        for dataset, row in grouped.iterrows():
+            for metric in metric_cols:
+                value = row[metric]
+                if pd.notna(value):
+                    out[f"val/{dataset}/{metric}"] = float(value)
+            n = int(merged_df.loc[merged_df["dataset"] == dataset, "example_id"].nunique())
+            out[f"val/{dataset}/n_examples"] = n
+        for metric in metric_cols:
+            macro = grouped[metric].mean()
+            if pd.notna(macro):
+                out[f"val/mean/{metric}"] = float(macro)
+        return out
+
+    def _maybe_log_to_loggers(self, trainer: Any, merged_df: pd.DataFrame) -> None:
+        if not self.log_to_loggers or not trainer.fabric.loggers:
+            return
+        if not trainer.fabric.is_global_zero:
+            return
+        metrics = self._per_dataset_metric_means(merged_df)
+        if metrics:
+            trainer.fabric.log_dict(metrics, step=trainer.state["global_step"])
 
     def _save_dataframe_for_rank(self, rank: int, epoch: int) -> None:
         """Saves per-GPU output dataframe of metrics to a rank-specific CSV."""
@@ -157,6 +193,8 @@ class StoreValidationMetricsInDFCallback(BaseCallback):
 
             # Store the path to the master CSV in the Trainer
             trainer.validation_results_path = master_path
+
+            self._maybe_log_to_loggers(trainer, merged_df)
 
             # Cleanup
             self._cleanup_temp_files()
