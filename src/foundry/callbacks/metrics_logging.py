@@ -178,15 +178,16 @@ class StoreValidationMetricsInDFCallback(BaseCallback):
         # Only rank 0 loads and concatenates the DataFrames
         ranked_logger.info("Loading and concatenating DataFrames...")
         if trainer.fabric.is_global_zero:
-            # ... load all partial CSVs
-            merged_df = self._load_and_concatenate_csvs(epoch)
+            # ... load all partial CSVs for THIS epoch
+            current_epoch_df = self._load_and_concatenate_csvs(epoch)
 
             # ... append to master CSV for all epochs
             master_path = self.save_dir / "validation_output_all_epochs.csv"
+            merged_df = current_epoch_df
             if master_path.exists():
                 old_df = pd.read_csv(master_path)
                 merged_df = pd.concat(
-                    [old_df, merged_df], ignore_index=True, sort=False
+                    [old_df, current_epoch_df], ignore_index=True, sort=False
                 )
             merged_df.to_csv(master_path, index=False)
             ranked_logger.info(f"Appended epoch={epoch} results to {master_path}")
@@ -194,7 +195,11 @@ class StoreValidationMetricsInDFCallback(BaseCallback):
             # Store the path to the master CSV in the Trainer
             trainer.validation_results_path = master_path
 
-            self._maybe_log_to_loggers(trainer, merged_df)
+            # Log ONLY the current epoch's metrics. Logging the accumulated master
+            # frame would make the per-bin means a running average over epochs
+            # 0..k (the fixed seed re-evaluates the same subset each epoch, so
+            # example_ids repeat), smearing the validation curve.
+            self._maybe_log_to_loggers(trainer, current_epoch_df)
 
             # Cleanup
             self._cleanup_temp_files()

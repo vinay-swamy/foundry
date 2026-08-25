@@ -160,5 +160,64 @@ def test_no_emit_when_no_loggers(tmp_path):
     assert trainer.fabric.logged == {}
 
 
+class _FakeFabricEpoch:
+    """Rank-0 fabric that records log_dict calls and no-ops barrier()."""
+
+    def __init__(self):
+        self.loggers = [object()]
+        self.is_global_zero = True
+        self.global_rank = 0
+        self.logged = {}
+
+    def barrier(self):
+        pass
+
+    def log_dict(self, d, step=None):
+        self.logged = dict(d)
+        self.logged["_step"] = step
+
+
+class _FakeTrainerEpoch:
+    def __init__(self, epoch: int, global_step: int):
+        self.fabric = _FakeFabricEpoch()
+        self.state = {"current_epoch": epoch, "global_step": global_step}
+
+
+def test_on_validation_epoch_end_logs_only_current_epoch(tmp_path):
+    """Regression: at epoch k, the per-bin metrics handed to the loggers must be the
+    CURRENT epoch's mean, not a running average over the master CSV (epochs 0..k).
+
+    The seed re-evaluates the same subset every epoch, so example_ids repeat across
+    epochs; logging the accumulated master frame would smear the validation curve.
+    """
+    cb = StoreValidationMetricsInDFCallback(save_dir=tmp_path, log_to_loggers=True)
+
+    # A pre-existing master CSV holding epoch 0 (metric value 0.1).
+    master_path = tmp_path / "validation_output_all_epochs.csv"
+    pd.DataFrame([
+        {"example_id": "a", "dataset": "sim_0.5", "sequence_recovery.mean": 0.1, "epoch": 0},
+        {"example_id": "b", "dataset": "sim_0.5", "sequence_recovery.mean": 0.1, "epoch": 0},
+    ]).to_csv(master_path, index=False)
+
+    # This epoch's (epoch 1) per-rank output: same examples, a very different value (0.9).
+    cb.per_gpu_outputs_df = pd.DataFrame([
+        {"example_id": "a", "dataset": "sim_0.5", "sequence_recovery.mean": 0.9, "epoch": 1},
+        {"example_id": "b", "dataset": "sim_0.5", "sequence_recovery.mean": 0.9, "epoch": 1},
+    ])
+
+    trainer = _FakeTrainerEpoch(epoch=1, global_step=42)
+    cb.on_validation_epoch_end(trainer)
+
+    # Logged value is the current epoch's mean (0.9), NOT the cross-epoch mean (0.5).
+    assert trainer.fabric.logged["val/sim_0.5/sequence_recovery.mean"] == pytest.approx(0.9)
+    assert trainer.fabric.logged["_step"] == 42
+
+    # CSV-writing path is unchanged: the master CSV still accumulates ALL epochs.
+    master = pd.read_csv(master_path)
+    assert sorted(master["epoch"].unique().tolist()) == [0, 1]
+    assert len(master) == 4
+    assert trainer.validation_results_path == master_path
+
+
 if __name__ == "__main__":
     pytest.main(["-v", __file__])
