@@ -32,6 +32,7 @@ from mpnn.transforms.feature_aggregation.mpnn import (
     FeaturizeAtomizedTokens,
     FeaturizeNonAtomizedTokens,
 )
+from mpnn.transforms.pdb_numbering import OverrideResIdxFromAuthorNumbering
 from mpnn.transforms.feature_aggregation.user_settings import (
     FeaturizeUserSettings,
 )
@@ -67,6 +68,7 @@ def build_mpnn_transform_pipeline(
     minimal_return: bool = False,
     train_structure_noise_default: float = 0.1,
     undesired_res_names: list[str] = AF3_EXCLUDED_LIGANDS,
+    preserve_author_numbering: bool = False,
     device: str | torch.device | None = None,
 ) -> Compose:
     """Build the MPNN transform pipeline.
@@ -87,6 +89,10 @@ def build_mpnn_transform_pipeline(
             Defaults to False.
         undesired_res_names (list[str]): List of residue names to treat as
             undesired and handle accordingly. Defaults to AF3_EXCLUDED_LIGANDS.
+        preserve_author_numbering (bool): If True, rewrite `within_chain_res_idx` from
+            author `res_id` on polymer chains so missing-density gaps survive. Intended
+            for `.pdb` inputs (whose parser welds gaps); leave False for CIF, which
+            already carries them. Defaults to False.
         device (str | torch.device, optional): Device to move tensors to.
             Defaults to None, which leads to default ConvertToTorch behavior.
     """
@@ -116,6 +122,10 @@ def build_mpnn_transform_pipeline(
         # + --------- Atomization --------- +
         # ... add within-chain instance res idx
         AddWithinChainInstanceResIdx(),
+        # ... for .pdb inputs, rewrite that index from author numbering so missing-density
+        # gaps survive (the .pdb parser assumes all residues resolved -> gaps get welded);
+        # no-op-equivalent Identity when disabled (e.g. CIF inputs already carry the gaps)
+        OverrideResIdxFromAuthorNumbering() if preserve_author_numbering else Identity(),
         FlagAndReassignCovalentModifications(),
         # Atomization: keep standard AA + unknown AA as residues,
         # atomize everything else
