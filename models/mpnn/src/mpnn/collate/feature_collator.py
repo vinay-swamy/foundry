@@ -168,6 +168,12 @@ class FeatureCollator:
 
         network_inputs = {"input_features": input_features, "atom_array": atom_arrays}
 
+        # Carry per-example ids (in batch order) so the trainer can tag metrics with them.
+        if all("example_id" in example for example in pipeline_outputs):
+            network_inputs["example_id"] = [
+                example["example_id"] for example in pipeline_outputs
+            ]
+
         return network_inputs
 
     def _deep_equal(self, a: Any, b: Any) -> bool:

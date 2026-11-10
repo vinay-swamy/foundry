@@ -18,6 +18,19 @@ from foundry.utils.torch import assert_no_nans
 ranked_logger = RankedLogger(__name__, rank_zero_only=True)
 
 
+def metrics_extra_info_from_batch(batch: Any) -> dict[str, Any]:
+    """`extra_info` for the MetricManager, which reads `extra_info["example_id"]`.
+
+    Validation runs one example per batch, giving a 1-to-1 metric-row -> manifest-row
+    join. For a multi-example batch the metrics are batch aggregates, so the ids are
+    comma-joined: honest about what the row covers, though not a single-row join key.
+    """
+    ids = batch.get("example_id") if isinstance(batch, dict) else None
+    if not ids:
+        return {}
+    return {"example_id": ids[0] if len(ids) == 1 else ",".join(map(str, ids))}
+
+
 class MPNNTrainer(FabricTrainer):
     """Standard Trainer for MPNN-style models"""
 
@@ -177,7 +190,7 @@ class MPNNTrainer(FabricTrainer):
             metrics_output = self.metrics(
                 network_input=batch,
                 network_output=network_output,
-                extra_info={},
+                extra_info=metrics_extra_info_from_batch(batch),
             )
 
             # Avoid gradients in stored values to prevent memory leaks

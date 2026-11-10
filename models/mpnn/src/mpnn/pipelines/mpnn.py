@@ -173,7 +173,9 @@ def build_mpnn_transform_pipeline(
             # that pass-through rather than stringifying it here.
             **({"device": device} if device is not None else {}),  # type: ignore[arg-type]
         ),
-        SubsetToKeys(keys=["input_features", "atom_array"]),
+        # Keep example_id so per-example validation metrics can be joined back to the
+        # manifest row (SubsetToKeys skips absent keys, so inference without an id is fine).
+        SubsetToKeys(keys=["input_features", "atom_array", "example_id"]),
     ]
 
     return Compose(transforms)
